@@ -47,6 +47,7 @@
 #define DS_OUTPUT_REPORT_BT 0x31
 #define DS_OUTPUT_REPORT_BT_SIZE 78
 #define DS_OUTPUT_REPORT_COMMON_SIZE 47
+#define DS_OUTPUT_REPORT_CHECKSUM_SIZE 4
 #define DS_OUTPUT_TAG 0x10
 #define DS_OUTPUT_VALID_FLAG0_COMPATIBLE_VIBRATION 0x01
 #define DS_OUTPUT_VALID_FLAG0_HAPTICS_SELECT 0x02
@@ -4122,13 +4123,13 @@ static __attribute__((noinline, noclone, optimize("O2"))) void __not_in_flash_fu
     bool has_more = output_pending_locked();
     bool should_request_control = false;
     request_control_if_audio_window_open_locked(now, should_request_control);
-    const bool transport_ready = prepare_interrupt_output_packet_for_send(
-        interrupt_send_packet
-    );
     critical_section_exit(&queue_lock);
 
-    if (!transport_ready) {
-        DS5_LOG("[L2CAP] Refusing malformed DualSense output transport report\n");
+    // interrupt_send_packet and state_report_seq are only touched from core 0's
+    // task context, so the report is finished outside queue_lock.
+    if (!prepare_interrupt_output_packet_for_send(interrupt_send_packet)) {
+        DS5_LOG("[L2CAP] Refusing interrupt output packet of length %u\n",
+            static_cast<unsigned>(interrupt_send_packet.data.size()));
         request_can_send_if_needed(has_more);
         request_control_can_send_if_needed(should_request_control);
         return;
@@ -4507,7 +4508,11 @@ static inline __attribute__((always_inline)) bool build_interrupt_output_packet(
     uint16_t len,
     ds5::InlineBytes<Capacity> &packet
 ) {
-    if (data == nullptr || !packet.assign_fill(len + 1u, 0)) {
+    if (
+        data == nullptr
+        || len < DS_OUTPUT_REPORT_CHECKSUM_SIZE
+        || !packet.assign_fill(len + 1u, 0)
+    ) {
         DS5_LOG("[L2CAP bt_write] Refusing output report of length %u\n",
             static_cast<unsigned>(len));
         packet.clear();
@@ -4515,12 +4520,6 @@ static inline __attribute__((always_inline)) bool build_interrupt_output_packet(
     }
     packet[0] = 0xA2;
     memcpy(packet.data() + 1, data, len);
-    if (!fill_output_report_checksum(packet.data() + 1, len)) {
-        DS5_LOG("[L2CAP bt_write] Refusing output report with invalid checksum length %u\n",
-            static_cast<unsigned>(len));
-        packet.clear();
-        return false;
-    }
     return true;
 }
 
@@ -4535,13 +4534,18 @@ static bool dualsense_output_transport_report(Packet const &packet) {
         || report_id == 0x39;
 }
 
+// Reports are framed without their checksum. Stamp the output sequence into
+// DualSense transport reports, then fill the CRC that covers it; a retried
+// report is stamped and filled again.
 static bool prepare_interrupt_output_packet_for_send(output_send_packet &packet) {
-    if (!dualsense_output_transport_report(packet)) {
-        return true;
+    if (packet.data.size() < 1u + DS_OUTPUT_REPORT_CHECKSUM_SIZE) {
+        return false;
     }
     uint8_t *report = packet.data.data() + 1;
     const uint16_t report_len = static_cast<uint16_t>(packet.data.size() - 1);
-    report[1] = static_cast<uint8_t>((state_report_seq & 0x0f) << 4);
+    if (dualsense_output_transport_report(packet)) {
+        report[1] = static_cast<uint8_t>((state_report_seq & 0x0f) << 4);
+    }
     return fill_output_report_checksum(report, report_len);
 }
 
@@ -5525,6 +5529,7 @@ bool __not_in_flash_func(bt_write_audio_stream)(uint8_t *data, uint16_t len) {
     if (
         hid_interrupt_cid == 0
         || data == nullptr
+        || len < DS_OUTPUT_REPORT_CHECKSUM_SIZE
         || len + 1u > AUDIO_INTERRUPT_PACKET_MAX_SIZE
     ) {
         return false;
@@ -5533,9 +5538,6 @@ bool __not_in_flash_func(bt_write_audio_stream)(uint8_t *data, uint16_t len) {
     audio_output_packet packet{};
     packet.data[0] = 0xA2;
     memcpy(packet.data.data() + 1, data, len);
-    if (!fill_output_report_checksum(packet.data.data() + 1, len)) {
-        return false;
-    }
     packet.data_size = static_cast<uint16_t>(len + 1u);
     packet.enqueue_time_us = time_us_32();
     packet.report_id = len > 0 ? data[0] : 0;
