@@ -2216,11 +2216,14 @@ static __attribute__((noinline)) void __not_in_flash_func(process_mic_usb_output
         return;
     }
 
-    static mic_decode_element mic_pb{};
+    // write_mic_usb_pending_frame returned false, so mic_usb_pending holds
+    // nothing left to send and the next frame is dequeued straight into it.
+    // If no current frame is found, whatever was dequeued stays there with
+    // mic_usb_pending_len == 0 and never reaches USB.
     const uint32_t generation = current_mic_stream_generation();
     bool found_current_frame = false;
-    while (queue_try_remove(&mic_decode_fifo, &mic_pb)) {
-        if (mic_pb.generation == generation) {
+    while (queue_try_remove(&mic_decode_fifo, &mic_usb_pending)) {
+        if (mic_usb_pending.generation == generation) {
             found_current_frame = true;
             break;
         }
@@ -2230,9 +2233,8 @@ static __attribute__((noinline)) void __not_in_flash_func(process_mic_usb_output
         return;
     }
 
-    memcpy(&mic_usb_pending, &mic_pb, sizeof(mic_usb_pending));
     mic_usb_pending_offset = 0;
-    mic_usb_pending_len = mic_pb.len;
+    mic_usb_pending_len = mic_usb_pending.len;
     (void)write_mic_usb_pending_frame(
         mic_usb_pending,
         mic_usb_pending_offset,
