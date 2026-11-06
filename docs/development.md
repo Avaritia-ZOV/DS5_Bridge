@@ -220,6 +220,7 @@ npm run dev
 | `src/bt.cpp` | Bluetooth inquiry, pairing, L2CAP HID channels, and report queueing. |
 | `src/audio.cpp` | USB audio ingestion, haptic resampling, Opus speaker encoding, and audio packet assembly. |
 | `src/audio_resampler.{h,cpp}` | Exact-ratio sample-rate conversion: speaker blocks (512 to 480 frames) and haptics (48 kHz to 3 kHz). |
+| `src/audio_reactive_haptics.h` | Audio Haptics: controller haptics derived from the speaker audio (bass filter, envelope, gate, mix or replace). |
 | `src/companion.cpp` | Vendor HID companion protocol, status reports, command ACKs, and runtime setting dispatch. |
 | `src/usb.cpp` | TinyUSB audio control callbacks and runtime settings fallback. |
 | `src/usb_descriptors.c` | USB device, configuration, HID report, audio, and string descriptors. |

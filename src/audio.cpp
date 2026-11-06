@@ -5,6 +5,7 @@
 
 #include "audio.h"
 #include "audio_exact_queue.h"
+#include "audio_reactive_haptics.h"
 #include "audio_resampler.h"
 #include "bt.h"
 #include "controller_output_policy.h"
@@ -62,12 +63,6 @@
 #define SPEAKER_SILENCE_PREROLL_USB_PACKETS 24
 #define SPEAKER_SILENCE_PREROLL_INTERVAL_US 10666
 #define AUDIO_REACTIVE_HAPTICS_MAX_GAIN_PERCENT 200
-#define AUDIO_REACTIVE_HAPTICS_GATE_THRESHOLD 98.0f
-#define AUDIO_REACTIVE_HAPTICS_ENVELOPE_ATTACK 0.40f
-#define AUDIO_REACTIVE_HAPTICS_ENVELOPE_RELEASE 0.025f
-#define AUDIO_REACTIVE_HAPTICS_GATE_OPEN_RATE 0.035f
-#define AUDIO_REACTIVE_HAPTICS_GATE_CLOSE_RATE 0.004f
-#define AUDIO_REACTIVE_HAPTICS_OUTPUT_RAMP_STEP 0.004f
 #define HOST_MIC_OPUS_SIZE 71
 #define HOST_MIC_OPUS_FRAMES 480
 #define HOST_MIC_INPUT_CHANNELS 1
@@ -240,22 +235,11 @@ static uint8_t pending_audio_haptics_count = 0;
 static bool pending_audio_include_speaker = false;
 static bool audio_reactive_haptics_config_enabled = false;
 static bool audio_haptics_session_config_active = false;
-static uint8_t audio_reactive_haptics_mode = AudioReactiveHapticsMix;
-static uint16_t audio_reactive_haptics_gain_percent = 100;
-static uint8_t audio_reactive_haptics_bass_focus = AudioReactiveHapticsBassBalanced;
-static uint8_t audio_reactive_haptics_response = AudioReactiveHapticsResponseBalanced;
-static uint8_t audio_reactive_haptics_attack = AudioReactiveHapticsAttackBalanced;
-static uint8_t audio_reactive_haptics_release = AudioReactiveHapticsReleaseBalanced;
+static ds5::audio::ReactiveHaptics audio_reactive_haptics;
 static bool audio_reactive_haptics_suppress_classic_rumble = false;
 // Set from the SRAM audio path when Replace takes ownership; the held-rumble
 // state is cleared from audio_loop instead of inside that path.
 static volatile bool audio_haptics_replace_rumble_clear_pending = false;
-static float audio_reactive_haptics_filter_l = 0.0f;
-static float audio_reactive_haptics_filter_r = 0.0f;
-static float audio_reactive_haptics_env_l = 0.0f;
-static float audio_reactive_haptics_env_r = 0.0f;
-static float audio_reactive_haptics_gate = 0.0f;
-static float audio_reactive_haptics_output_ramp = 0.0f;
 static volatile bool duplex_requested = true;
 static uint32_t mic_packets_received = 0;
 static uint32_t mic_packets_dropped = 0;
@@ -920,12 +904,7 @@ static bool valid_audio_reactive_haptics_release(uint8_t release) {
 }
 
 void audio_reactive_haptics_reset() {
-    audio_reactive_haptics_filter_l = 0.0f;
-    audio_reactive_haptics_filter_r = 0.0f;
-    audio_reactive_haptics_env_l = 0.0f;
-    audio_reactive_haptics_env_r = 0.0f;
-    audio_reactive_haptics_gate = 0.0f;
-    audio_reactive_haptics_output_ramp = 0.0f;
+    audio_reactive_haptics.reset();
 }
 
 static void refresh_audio_haptics_replace_policy() {
@@ -971,24 +950,22 @@ bool audio_set_reactive_haptics_config(
         return false;
     }
 
+    const ds5::audio::ReactiveHapticsSettings settings{
+        .mode = mode,
+        .gain_percent = gain_percent,
+        .bass_focus = bass_focus,
+        .response = response,
+        .attack = attack,
+        .release = release,
+    };
     const bool producer_path_changed = audio_reactive_haptics_config_enabled != enabled;
     const bool changed = producer_path_changed
         || audio_haptics_session_config_active != session_active
-        || audio_reactive_haptics_mode != mode
-        || audio_reactive_haptics_gain_percent != gain_percent
-        || audio_reactive_haptics_bass_focus != bass_focus
-        || audio_reactive_haptics_response != response
-        || audio_reactive_haptics_attack != attack
-        || audio_reactive_haptics_release != release
+        || audio_reactive_haptics.settings() != settings
         || audio_reactive_haptics_suppress_classic_rumble != suppress_classic_rumble;
     audio_reactive_haptics_config_enabled = enabled;
     audio_haptics_session_config_active = session_active;
-    audio_reactive_haptics_mode = mode;
-    audio_reactive_haptics_gain_percent = gain_percent;
-    audio_reactive_haptics_bass_focus = bass_focus;
-    audio_reactive_haptics_response = response;
-    audio_reactive_haptics_attack = attack;
-    audio_reactive_haptics_release = release;
+    audio_reactive_haptics.configure(settings);
     audio_reactive_haptics_suppress_classic_rumble = suppress_classic_rumble;
     if (!session_active || producer_path_changed) {
         controller_output_policy_reset_audio_haptics_producer();
@@ -1289,181 +1266,6 @@ void audio_handle_bridge_audio_report(uint8_t const *report, uint16_t len) {
         process_bridge_audio_frame(bridge_audio_frame);
     }
     bridge_audio_reset_reassembly();
-}
-
-static float audio_reactive_haptics_filter_coeff() {
-    switch (audio_reactive_haptics_bass_focus) {
-        case AudioReactiveHapticsBassDeep:
-            return 0.01039f;
-        case AudioReactiveHapticsBassPunchy:
-            return 0.03095f;
-        case AudioReactiveHapticsBassWide:
-            return 0.05123f;
-        case AudioReactiveHapticsBassBalanced:
-        default:
-            return 0.02074f;
-    }
-}
-
-static float audio_reactive_haptics_focus_gain() {
-    switch (audio_reactive_haptics_bass_focus) {
-        case AudioReactiveHapticsBassDeep:
-            return 1.35f;
-        case AudioReactiveHapticsBassPunchy:
-            return 1.12f;
-        case AudioReactiveHapticsBassWide:
-            return 0.92f;
-        case AudioReactiveHapticsBassBalanced:
-        default:
-            return 1.0f;
-    }
-}
-
-static float audio_reactive_haptics_response_gain() {
-    switch (audio_reactive_haptics_response) {
-        case AudioReactiveHapticsResponseSubtle:
-            return 0.68f;
-        case AudioReactiveHapticsResponseStrong:
-            return 1.0f;
-        case AudioReactiveHapticsResponseBalanced:
-        default:
-            return 1.0f;
-    }
-}
-
-static float audio_reactive_haptics_response_punch() {
-    switch (audio_reactive_haptics_response) {
-        case AudioReactiveHapticsResponseSubtle:
-            return 0.0f;
-        case AudioReactiveHapticsResponseStrong:
-            return 3.0f;
-        case AudioReactiveHapticsResponseBalanced:
-        default:
-            return 1.5f;
-    }
-}
-
-static float audio_reactive_haptics_envelope_punch(float envelope) {
-    const float normalized = clamp(envelope / 32768.0f, 0.0f, 1.0f);
-    return 1.0f + (audio_reactive_haptics_response_punch() * normalized);
-}
-
-static float abs_float(float value) {
-    return value < 0.0f ? -value : value;
-}
-
-static float audio_reactive_haptics_attack_coeff() {
-    switch (audio_reactive_haptics_attack) {
-        case AudioReactiveHapticsAttackSoft:
-            return 0.20f;
-        case AudioReactiveHapticsAttackFast:
-            return 0.65f;
-        case AudioReactiveHapticsAttackSharp:
-            return 0.90f;
-        case AudioReactiveHapticsAttackBalanced:
-        default:
-            return AUDIO_REACTIVE_HAPTICS_ENVELOPE_ATTACK;
-    }
-}
-
-static float audio_reactive_haptics_release_coeff() {
-    switch (audio_reactive_haptics_release) {
-        case AudioReactiveHapticsReleaseTight:
-            return 0.055f;
-        case AudioReactiveHapticsReleaseSmooth:
-            return 0.012f;
-        case AudioReactiveHapticsReleaseLong:
-            return 0.006f;
-        case AudioReactiveHapticsReleaseBalanced:
-        default:
-            return AUDIO_REACTIVE_HAPTICS_ENVELOPE_RELEASE;
-    }
-}
-
-static float follow_envelope(float current, float value) {
-    const float target = abs_float(value);
-    const float rate = target > current
-        ? audio_reactive_haptics_attack_coeff()
-        : audio_reactive_haptics_release_coeff();
-    return current + ((target - current) * rate);
-}
-
-static float soft_clip_unit(float value) {
-    const float x = clamp(value, -4.0f, 4.0f);
-    const float x2 = x * x;
-    return clamp((x * (27.0f + x2)) / (27.0f + (9.0f * x2)), -1.0f, 1.0f);
-}
-
-static int16_t soft_clip_i16_from_float(float value) {
-    const float normalized = value / 32768.0f;
-    const float clipped = soft_clip_unit(normalized);
-    return static_cast<int16_t>(
-        clamp(
-            static_cast<int32_t>(clipped * 32767.0f),
-            static_cast<int32_t>(-32768),
-            static_cast<int32_t>(32767)
-        )
-    );
-}
-
-static int16_t mix_i16(int16_t native_sample, int16_t derived_sample) {
-    return soft_clip_i16_from_float(static_cast<float>(native_sample) + static_cast<float>(derived_sample));
-}
-
-static void process_audio_reactive_haptic_frame(
-    int16_t speaker_l,
-    int16_t speaker_r,
-    int16_t native_haptic_l,
-    int16_t native_haptic_r,
-    int16_t &out_l,
-    int16_t &out_r
-) {
-    if (!audio_reactive_haptics_config_enabled || quiet_mode_enabled) {
-        out_l = native_haptic_l;
-        out_r = native_haptic_r;
-        return;
-    }
-
-    const float coeff = audio_reactive_haptics_filter_coeff();
-    audio_reactive_haptics_filter_l += (static_cast<float>(speaker_l) - audio_reactive_haptics_filter_l) * coeff;
-    audio_reactive_haptics_filter_r += (static_cast<float>(speaker_r) - audio_reactive_haptics_filter_r) * coeff;
-    audio_reactive_haptics_env_l = follow_envelope(audio_reactive_haptics_env_l, audio_reactive_haptics_filter_l);
-    audio_reactive_haptics_env_r = follow_envelope(audio_reactive_haptics_env_r, audio_reactive_haptics_filter_r);
-
-    const float peak = max(audio_reactive_haptics_env_l, audio_reactive_haptics_env_r);
-    const float gate_target = peak > AUDIO_REACTIVE_HAPTICS_GATE_THRESHOLD ? 1.0f : 0.0f;
-    const float gate_rate = gate_target > audio_reactive_haptics_gate
-        ? AUDIO_REACTIVE_HAPTICS_GATE_OPEN_RATE
-        : AUDIO_REACTIVE_HAPTICS_GATE_CLOSE_RATE;
-    audio_reactive_haptics_gate += (gate_target - audio_reactive_haptics_gate) * gate_rate;
-    audio_reactive_haptics_output_ramp = std::min(
-        1.0f,
-        audio_reactive_haptics_output_ramp + AUDIO_REACTIVE_HAPTICS_OUTPUT_RAMP_STEP
-    );
-
-    const float gain = (static_cast<float>(audio_reactive_haptics_gain_percent) / 100.0f)
-        * audio_reactive_haptics_focus_gain()
-        * audio_reactive_haptics_response_gain()
-        * audio_reactive_haptics_gate
-        * audio_reactive_haptics_output_ramp;
-    const int16_t derived_l = soft_clip_i16_from_float(
-        audio_reactive_haptics_filter_l
-        * gain
-        * audio_reactive_haptics_envelope_punch(audio_reactive_haptics_env_l)
-    );
-    const int16_t derived_r = soft_clip_i16_from_float(
-        audio_reactive_haptics_filter_r
-        * gain
-        * audio_reactive_haptics_envelope_punch(audio_reactive_haptics_env_r)
-    );
-    if (audio_reactive_haptics_mode == AudioReactiveHapticsReplace) {
-        out_l = derived_l;
-        out_r = derived_r;
-        return;
-    }
-
-    out_l = mix_i16(native_haptic_l, derived_l);
-    out_r = mix_i16(native_haptic_r, derived_r);
 }
 
 static int8_t quantize_haptic_sample(float sample, float gain) {
@@ -1873,6 +1675,7 @@ static bool __not_in_flash_func(process_usb_audio_packet)() {
     if (!speaker_route_demanded) {
         speaker_block_pos = 0;
     }
+    const bool reactive_haptics_active = audio_reactive_haptics_config_enabled && !quiet_mode_enabled;
     // Windows sends USB Audio volume controls for this endpoint instead of pre-scaling PCM.
     const float host_render_gain = clamp(usb_host_speaker_gain, 0.0f, 1.0f);
     for (int i = 0; i < frames; i++) {
@@ -1919,26 +1722,23 @@ static bool __not_in_flash_func(process_usb_audio_packet)() {
             speaker_block_pos = 0;
         }
 
-        // Audio-reactive haptics filter every frame; 48 kHz -> 3 kHz keeps
-        // one frame in 16.
-        int16_t processed_haptic_l = haptic_l;
-        int16_t processed_haptic_r = haptic_r;
-        process_audio_reactive_haptic_frame(
-            speaker_l,
-            speaker_r,
-            haptic_l,
-            haptic_r,
-            processed_haptic_l,
-            processed_haptic_r
-        );
-        if (
-            haptics_decimator.keep_frame()
-            && append_resampled_haptic_sample(
-                static_cast<float>(processed_haptic_l) / 32768.0f,
-                static_cast<float>(processed_haptic_r) / 32768.0f,
+        // Audio Haptics filters every frame; 48 kHz -> 3 kHz keeps one frame in
+        // 16 and only a kept frame is rendered.
+        if (reactive_haptics_active) {
+            audio_reactive_haptics.update(speaker_l, speaker_r);
+        }
+        if (!haptics_decimator.keep_frame()) {
+            continue;
+        }
+        ds5::audio::HapticFrame haptic{.left = haptic_l, .right = haptic_r};
+        if (reactive_haptics_active) {
+            haptic = audio_reactive_haptics.render(haptic);
+        }
+        if (append_resampled_haptic_sample(
+                static_cast<float>(haptic.left) / 32768.0f,
+                static_cast<float>(haptic.right) / 32768.0f,
                 haptic_gain
-            )
-        ) {
+            )) {
             send_audio_haptics_packet(audio_haptic_buf, speaker_route_demanded);
         }
     }
