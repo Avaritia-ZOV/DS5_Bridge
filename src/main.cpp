@@ -435,6 +435,20 @@ static uint16_t ds4_copy_input_report_payload(uint8_t report_id, uint8_t *buffer
     return copy_len;
 }
 
+static uint16_t ds4_copy_feature_report_payload(uint8_t report_id, uint8_t *buffer, uint16_t reqlen) {
+    uint8_t calibration[64]{};
+    uint16_t calibration_len = 0;
+    if (report_id == kDs4FeatureCalibrationUsb || report_id == kDs4FeatureCalibrationBt) {
+        (void)bt_copy_feature_data(
+            kDualSenseFeatureCalibration,
+            calibration,
+            sizeof(calibration),
+            &calibration_len
+        );
+    }
+    return ds4_persona_get_feature_report(report_id, buffer, reqlen, calibration, calibration_len);
+}
+
 static bool dualsense_feature_report_may_use_bt_passthrough(
     HostPersonaMode output_persona,
     uint8_t report_id
@@ -699,7 +713,7 @@ uint16_t tud_hid_get_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t
             return ds4_copy_input_report_payload(report_id, buffer, reqlen);
         }
         if (report_type == HID_REPORT_TYPE_FEATURE) {
-            return ds4_persona_get_feature_report(report_id, buffer, reqlen);
+            return ds4_copy_feature_report_payload(report_id, buffer, reqlen);
         }
         return 0;
     }

@@ -8,7 +8,6 @@
 namespace {
 
 constexpr uint8_t kDualSenseFeatureCapabilities = 0x03;
-constexpr uint8_t kDualSenseFeatureCalibration = 0x05;
 constexpr uint8_t kDualSenseFeaturePairingInfo = 0x09;
 constexpr uint8_t kDualSenseFeatureFirmwareInfo = 0x20;
 // Little-endian, as the pairing report carries it. Replaced per bridge at boot.

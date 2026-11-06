@@ -1571,6 +1571,49 @@ void ds4_persona_motion_timestamp_uses_ds4_ticks() {
     EXPECT_EQ(static_cast<uint16_t>(ds4_motion_timestamp_for(0x00000010u + 1600u) - before_restart), 100);
 }
 
+// A DS4 persona reports the DualSense's own calibration: as is for USB 0x02,
+// which shares the DualSense 0x05 layout, and with the gyro plus values first
+// for Bluetooth 0x05. Without a complete calibration it stays synthetic.
+void ds4_calibration_reports_carry_controller_calibration() {
+    constexpr std::size_t kFields = 17;
+    const auto source_value = [](std::size_t field) {
+        return static_cast<uint16_t>(0x0100 * field + 0x11);
+    };
+    const auto field_at = [](std::array<uint8_t, 64> const &feature, std::size_t field) {
+        return static_cast<uint16_t>(feature[field * 2] | (feature[field * 2 + 1] << 8));
+    };
+    std::array<uint8_t, 40> dualsense{};
+    for (std::size_t field = 0; field < kFields; ++field) {
+        const uint16_t value = source_value(field);
+        dualsense[field * 2] = static_cast<uint8_t>(value);
+        dualsense[field * 2 + 1] = static_cast<uint8_t>(value >> 8);
+    }
+
+    std::array<uint8_t, 64> feature{};
+    EXPECT_EQ(ds4_persona_get_feature_report(0x02, feature.data(), 36, dualsense.data(), dualsense.size()), 36);
+    for (std::size_t field = 0; field < kFields; ++field) {
+        EXPECT_EQ(field_at(feature, field), source_value(field));
+    }
+
+    constexpr std::size_t kBluetoothOrder[kFields] = {0, 1, 2, 3, 5, 7, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    feature.fill(0);
+    EXPECT_EQ(ds4_persona_get_feature_report(0x05, feature.data(), 36, dualsense.data(), dualsense.size()), 36);
+    for (std::size_t field = 0; field < kFields; ++field) {
+        EXPECT_EQ(field_at(feature, field), source_value(kBluetoothOrder[field]));
+    }
+
+    constexpr uint16_t kCalibrationBytes = kFields * 2;
+    feature.fill(0);
+    EXPECT_EQ(ds4_persona_get_feature_report(0x02, feature.data(), 36, dualsense.data(), kCalibrationBytes), 36);
+    EXPECT_EQ(field_at(feature, kFields - 1), source_value(kFields - 1));
+
+    std::array<uint8_t, 64> synthetic{};
+    EXPECT_EQ(ds4_persona_get_feature_report(0x02, synthetic.data(), 36), 36);
+    feature.fill(0);
+    EXPECT_EQ(ds4_persona_get_feature_report(0x02, feature.data(), 36, dualsense.data(), kCalibrationBytes - 1), 36);
+    EXPECT_TRUE(feature == synthetic);
+}
+
 void ds4_output_decodes_to_ds5_rumble_and_lightbar_payload() {
     uint8_t output[] = {0x05, 0x03, 0x00, 0x00, 0x12, 0xfe, 0x11, 0x22, 0x33, 0x04, 0x05};
     Payload payload{};
@@ -1710,10 +1753,18 @@ void ds4_feature_reports_cover_native_probe_surface() {
     EXPECT_EQ(feature[1], 0x27);
     EXPECT_EQ(feature[3], 0x4e);
 
+    // Synthetic calibration: USB 0x02 pairs each gyro plus value with its
+    // minus value; Bluetooth 0x05 lists the three plus values first.
+    feature.fill(0);
+    EXPECT_EQ(ds4_persona_get_feature_report(0x02, feature.data(), 36), 36);
+    EXPECT_EQ(feature[7], 0x04);
+    EXPECT_EQ(feature[9], 0xfc);
+
     feature.fill(0);
     EXPECT_EQ(ds4_persona_get_feature_report(0x05, feature.data(), 36), 36);
     EXPECT_EQ(feature[7], 0x04);
-    EXPECT_EQ(feature[9], 0xfc);
+    EXPECT_EQ(feature[9], 0x04);
+    EXPECT_EQ(feature[13], 0xfc);
 
     feature.fill(0);
     EXPECT_EQ(ds4_persona_get_feature_report(0x81, feature.data(), 63), 63);
@@ -1855,6 +1906,7 @@ std::vector<TestCase> tests{
     {"ds4 output decodes to ds5 rumble and lightbar payload", ds4_output_decodes_to_ds5_rumble_and_lightbar_payload},
     {"dualsense persona feature reports cover identity probe surface", dualsense_persona_feature_reports_cover_identity_probe_surface},
     {"ds4 feature reports cover native probe surface", ds4_feature_reports_cover_native_probe_surface},
+    {"ds4 calibration reports carry controller calibration", ds4_calibration_reports_carry_controller_calibration},
     {"radial deadzone preserves direction and rescales remaining travel", radial_deadzone_preserves_direction_and_rescales_remaining_travel},
     // Must stay last: it replaces the personas' default synthetic identity.
     {"synthetic persona identities are per bridge and locally administered", synthetic_persona_identities_are_per_bridge_and_locally_administered},

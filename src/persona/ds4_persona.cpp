@@ -35,7 +35,6 @@ constexpr uint16_t kDs4TouchpadWidth = 1920;
 constexpr uint16_t kDs4TouchpadHeight = 942;
 
 constexpr uint8_t kDs4FeatureCapabilities = 0x03;
-constexpr uint8_t kDs4FeatureCalibrationBt = 0x05;
 constexpr uint8_t kDs4FeatureIdentity = 0x81;
 constexpr uint8_t kDs4FeatureBoardInfo = 0xa3;
 constexpr uint8_t kDs4FeatureTelemetry = 0xa4;
@@ -62,6 +61,27 @@ constexpr uint32_t kDs4MotionClockMaxGapTicks = 0xffffu * kDualSenseTicksPerDs4T
 bool ds4_motion_clock_started = false;
 uint32_t ds4_motion_last_sensor_timestamp = 0;
 uint32_t ds4_motion_tick_remainder = 0;
+// DualSense calibration (feature 0x05, here without its report ID) and DS4
+// USB calibration (0x02) share one layout of 17 little-endian fields: three
+// gyro biases, plus/minus pairs for pitch, yaw and roll, the gyro speed pair,
+// then plus/minus pairs for the three accelerometer axes. This persona
+// forwards the DualSense's raw gyro and accelerometer samples, so the
+// DualSense's own calibration is the one that describes them. DS4 Bluetooth
+// calibration (0x05) lists the three gyro plus values before the minus ones.
+constexpr uint8_t kDs4CalibrationFields = 17;
+constexpr int16_t kDs4SyntheticCalibration[kDs4CalibrationFields] = {
+    0, 0, 0,
+    1024, -1024, 1024, -1024, 1024, -1024,
+    64, 64,
+    8192, -8192, 8192, -8192, 8192, -8192,
+};
+constexpr uint8_t kDs4BluetoothCalibrationOrder[kDs4CalibrationFields] = {
+    0, 1, 2,
+    3, 5, 7, 4, 6, 8,
+    9, 10,
+    11, 12, 13, 14, 15, 16,
+};
+
 uint8_t ds4_probe_selector[3]{};
 uint8_t ds4_telemetry_subcommand = 0;
 
@@ -168,16 +188,26 @@ void copy_ascii(uint8_t *dest, uint16_t capacity, char const *text) {
     }
 }
 
-void write_ds4_calibration_report(uint8_t report_id, uint8_t *report) {
-    constexpr int16_t fields[17] = {
-        0, 0, 0,
-        1024, -1024, 1024, -1024, 1024, -1024,
-        64, 64,
-        8192, -8192, 8192, -8192, 8192, -8192,
-    };
+void write_ds4_calibration_report(
+    uint8_t report_id,
+    uint8_t const *dualsense_calibration,
+    uint16_t dualsense_calibration_len,
+    uint8_t *report
+) {
+    const bool use_controller_calibration = dualsense_calibration != nullptr
+        && dualsense_calibration_len >= kDs4CalibrationFields * 2;
     report[0] = report_id;
-    for (uint8_t index = 0; index < 17; index++) {
-        write_i16(report + 1 + index * 2, fields[index]);
+    for (uint8_t index = 0; index < kDs4CalibrationFields; index++) {
+        const uint8_t source = report_id == kDs4FeatureCalibrationBt
+            ? kDs4BluetoothCalibrationOrder[index]
+            : index;
+        uint8_t *field = report + 1 + index * 2;
+        if (use_controller_calibration) {
+            field[0] = dualsense_calibration[source * 2];
+            field[1] = dualsense_calibration[source * 2 + 1];
+        } else {
+            write_i16(field, kDs4SyntheticCalibration[source]);
+        }
     }
 }
 
@@ -290,15 +320,17 @@ bool ds4_persona_decode_output_to_ds5_payload(
 uint16_t ds4_persona_get_feature_report(
     uint8_t report_id,
     uint8_t *buffer,
-    uint16_t reqlen
+    uint16_t reqlen,
+    uint8_t const *dualsense_calibration,
+    uint16_t dualsense_calibration_len
 ) {
     uint8_t report[64]{};
     report[0] = report_id;
 
     switch (report_id) {
-        case 0x02:
+        case kDs4FeatureCalibrationUsb:
         case kDs4FeatureCalibrationBt:
-            write_ds4_calibration_report(report_id, report);
+            write_ds4_calibration_report(report_id, dualsense_calibration, dualsense_calibration_len, report);
             return copy_feature_payload(report, 37, buffer, reqlen);
 
         case kDs4FeatureCapabilities:

@@ -3,6 +3,8 @@
 
 #include "persona/host_persona.h"
 
+constexpr uint8_t kDualSenseFeatureCalibration = 0x05;
+
 bool dualsense_persona_encode_input(
     BridgeControllerState const &state,
     HostPersonaInputReport &report

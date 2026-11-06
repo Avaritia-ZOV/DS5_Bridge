@@ -168,6 +168,22 @@ void assert_persona_support_requires_verified_descriptors(
         throw std::runtime_error("Host persona input reports must be blocked for unverified descriptors");
     }
 
+    // DS4 GET_REPORT(Feature) gives calibration reports the controller's
+    // calibration.
+    const auto main_cpp = read_text(source_root / "src" / "main.cpp");
+    const std::string ds4_feature_block = extract_between(
+        main_cpp,
+        "static uint16_t ds4_copy_feature_report_payload(",
+        "\n}\n"
+    );
+    if (
+        ds4_feature_block.find("kDualSenseFeatureCalibration") == std::string::npos
+        || ds4_feature_block.find("bt_copy_feature_data(") == std::string::npos
+        || main_cpp.find("return ds4_copy_feature_report_payload(report_id, buffer, reqlen);") == std::string::npos
+    ) {
+        throw std::runtime_error("DS4 GET_REPORT must pass the controller calibration");
+    }
+
     const std::string decode_block = extract_between(
         host_persona_cpp,
         "bool host_persona_decode_output_to_ds5_payload(",
