@@ -36,7 +36,6 @@
 #include "pico/time.h"
 
 #define INPUT_CHANNELS    4
-#define OUTPUT_CHANNELS   2
 #define SAMPLE_SIZE       64
 #define SPEAKER_OPUS_SIZE 200
 #define AUDIO_BATCH_FRAMES 2

@@ -18,7 +18,8 @@ inline constexpr std::size_t kSpeakerBlockOutputSamples = kSpeakerBlockOutputFra
 
 // Converts one interleaved stereo speaker block from 512 to 480 frames by
 // linear interpolation at input position 16k / 15. Stateless; output frames
-// that land on a whole input frame are copies of it.
+// that land on a whole input frame are copies of it. The buffers must not
+// overlap.
 void resample_speaker_block(
     std::span<const float, kSpeakerBlockInputSamples> input,
     std::span<float, kSpeakerBlockOutputSamples> output

@@ -1,6 +1,6 @@
 // The exact-ratio audio resamplers: the speaker block lands on 16k/15 with
 // linear interpolation and stays inside its buffers, and haptics decimation
-// keeps every 16th frame of the stream however the USB reads split it.
+// keeps every 16th frame of the stream since the last reset.
 
 #include <algorithm>
 #include <cmath>
@@ -54,7 +54,7 @@ double reference(float const *in, std::size_t k, std::size_t channel) {
     return current + (next - current) * weight;
 }
 
-void check_speaker_against_reference() {
+void test_speaker_against_reference() {
     Lcg rng;
     float in[kIn];
     float out[kOut];
@@ -74,7 +74,7 @@ void check_speaker_against_reference() {
     CHECK(max_error < 2.5e-7);
 }
 
-void check_speaker_exact_cases() {
+void test_speaker_exact_cases() {
     float in[kIn];
     float out[kOut];
 
@@ -112,7 +112,7 @@ void check_speaker_exact_cases() {
     CHECK(std::fabs(out[kOut - 1] + 14.0f / 15.0f) < 1e-7f);
 }
 
-void check_speaker_stays_in_bounds() {
+void test_speaker_stays_in_bounds() {
     // Guards around both buffers: NaN around the input turns any read outside
     // it into a NaN output, and a finite marker around the output catches any
     // write outside it, including a write of NaN.
@@ -138,23 +138,14 @@ void check_speaker_stays_in_bounds() {
     }
 }
 
-void check_haptics_decimator() {
+void test_haptics_decimator() {
     static_assert(audio::HapticsDecimator::kFactor == 16);
 
-    // Reads of every size from 1 to 48 frames keep exactly frames 0, 16,
-    // 32, ... of the stream.
+    // Exactly frames 0, 16, 32, ... of the stream are kept.
     audio::HapticsDecimator decimator;
-    uint32_t stream_frame = 0;
-    uint32_t kept = 0;
-    for (uint32_t read = 0; read < 2000; ++read) {
-        const uint32_t frames = 1 + (read * 7) % 48;
-        for (uint32_t i = 0; i < frames; ++i, ++stream_frame) {
-            const bool keep = decimator.keep_frame();
-            CHECK(keep == (stream_frame % 16 == 0));
-            kept += keep;
-        }
+    for (uint32_t frame = 0; frame < 4000; ++frame) {
+        CHECK(decimator.keep_frame() == (frame % 16 == 0));
     }
-    CHECK(kept == (stream_frame + 15) / 16);
 
     // Reset starts a new stream: its first frame is kept.
     for (int i = 0; i < 5; ++i) {
@@ -171,10 +162,10 @@ void check_haptics_decimator() {
 } // namespace
 
 int main() {
-    check_speaker_against_reference();
-    check_speaker_exact_cases();
-    check_speaker_stays_in_bounds();
-    check_haptics_decimator();
+    test_speaker_against_reference();
+    test_speaker_exact_cases();
+    test_speaker_stays_in_bounds();
+    test_haptics_decimator();
     std::printf("Audio resampler checks passed\n");
     return 0;
 }

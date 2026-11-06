@@ -23,7 +23,8 @@ static_assert(kGroups * kPhases == kSpeakerBlockOutputFrames);
 static_assert(kGroups * kGroupInputFrames == kSpeakerBlockInputFrames);
 
 // Weight r / 15 for each phase, rounded once at compile time. Core 1 reads it
-// for every output frame, so it lives in SRAM beside resample_speaker_block.
+// for every output frame, so a table the compiler keeps in memory lives in
+// SRAM beside resample_speaker_block.
 constexpr std::array<float, kPhases> __not_in_flash("audio_resampler") phase_weights = [] {
     std::array<float, kPhases> weights{};
     for (std::size_t phase = 0; phase < kPhases; ++phase) {
