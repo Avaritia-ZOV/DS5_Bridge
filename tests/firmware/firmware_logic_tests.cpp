@@ -1519,18 +1519,34 @@ void ds4_persona_maps_standard_gamepad_fields() {
     EXPECT_EQ(encoded.bytes[41], 0x00);
 }
 
-uint16_t ds4_motion_timestamp_for(uint32_t sensor_timestamp, bool motion_valid = true) {
+BridgeControllerState ds4_motion_state_at(uint32_t sensor_timestamp, bool motion_valid = true) {
     auto report = sample_dualsense_input_report();
     report[27] = static_cast<uint8_t>(sensor_timestamp);
     report[28] = static_cast<uint8_t>(sensor_timestamp >> 8);
     report[29] = static_cast<uint8_t>(sensor_timestamp >> 16);
     report[30] = static_cast<uint8_t>(sensor_timestamp >> 24);
     BridgeControllerState state{};
-    HostPersonaInputReport encoded{};
     EXPECT_TRUE(dualsense_decode_usb_input_report(report.data(), report.size(), state));
     state.motion_valid = motion_valid;
-    EXPECT_TRUE(host_persona_encode_input(HostPersonaModeDs4, state, encoded));
-    return static_cast<uint16_t>(encoded.bytes[9] | (encoded.bytes[10] << 8));
+    return state;
+}
+
+uint16_t ds4_report_timestamp(HostPersonaInputReport const &report) {
+    return static_cast<uint16_t>(report.bytes[9] | (report.bytes[10] << 8));
+}
+
+uint8_t ds4_report_counter(HostPersonaInputReport const &report) {
+    return static_cast<uint8_t>(report.bytes[6] >> 2);
+}
+
+uint16_t ds4_motion_timestamp_for(uint32_t sensor_timestamp, bool motion_valid = true) {
+    HostPersonaInputReport encoded{};
+    EXPECT_TRUE(host_persona_encode_input(
+        HostPersonaModeDs4,
+        ds4_motion_state_at(sensor_timestamp, motion_valid),
+        encoded
+    ));
+    return ds4_report_timestamp(encoded);
 }
 
 // The DualSense motion clock ticks every 1/3 us and a DS4's every 16/3 us.
@@ -1569,6 +1585,32 @@ void ds4_persona_motion_timestamp_uses_ds4_ticks() {
     const uint16_t before_restart = ds4_motion_timestamp_for(0x50000000u);
     EXPECT_EQ(ds4_motion_timestamp_for(0x00000010u), before_restart);
     EXPECT_EQ(static_cast<uint16_t>(ds4_motion_timestamp_for(0x00000010u + 1600u) - before_restart), 100);
+}
+
+// GET_REPORT(Input) reads the latest state while an older report may still
+// be queued for the interrupt endpoint. Encoding the read through the stream
+// would stamp that report with the newer sample's time, stretching its
+// interval and leaving the motion clock ahead from then on, and would skip a
+// report counter value.
+void ds4_input_snapshot_leaves_interrupt_stream_alone() {
+    HostPersonaInputReport report{};
+    ds4_motion_timestamp_for(0, false);
+    EXPECT_TRUE(ds4_persona_encode_input(ds4_motion_state_at(0x30000000u), report));
+    const uint16_t start = ds4_report_timestamp(report);
+    const uint8_t counter = ds4_report_counter(report);
+
+    // The snapshot shows what the stream would send for this state next...
+    HostPersonaInputReport snapshot{};
+    EXPECT_TRUE(ds4_persona_encode_input_snapshot(ds4_motion_state_at(0x30000000u + 24000u), snapshot));
+    EXPECT_EQ(static_cast<uint16_t>(ds4_report_timestamp(snapshot) - start), 1500);
+    EXPECT_EQ(ds4_report_counter(snapshot), static_cast<uint8_t>((counter + 1) & 0x3f));
+
+    // ...and the stream continues as if it had not been taken.
+    EXPECT_TRUE(ds4_persona_encode_input(ds4_motion_state_at(0x30000000u + 12000u), report));
+    EXPECT_EQ(static_cast<uint16_t>(ds4_report_timestamp(report) - start), 750);
+    EXPECT_EQ(ds4_report_counter(report), static_cast<uint8_t>((counter + 1) & 0x3f));
+    EXPECT_TRUE(ds4_persona_encode_input(ds4_motion_state_at(0x30000000u + 24000u), report));
+    EXPECT_EQ(static_cast<uint16_t>(ds4_report_timestamp(report) - start), 1500);
 }
 
 // A DS4 persona reports the DualSense's own calibration: as is for USB 0x02,
@@ -1903,6 +1945,7 @@ std::vector<TestCase> tests{
     {"host zero rumble stop only restores active audio haptics", host_zero_rumble_stop_only_restores_an_active_audio_haptics_session},
     {"ds4 persona maps standard gamepad fields", ds4_persona_maps_standard_gamepad_fields},
     {"ds4 persona motion timestamp uses ds4 ticks", ds4_persona_motion_timestamp_uses_ds4_ticks},
+    {"ds4 input snapshot leaves interrupt stream alone", ds4_input_snapshot_leaves_interrupt_stream_alone},
     {"ds4 output decodes to ds5 rumble and lightbar payload", ds4_output_decodes_to_ds5_rumble_and_lightbar_payload},
     {"dualsense persona feature reports cover identity probe surface", dualsense_persona_feature_reports_cover_identity_probe_surface},
     {"ds4 feature reports cover native probe surface", ds4_feature_reports_cover_native_probe_surface},

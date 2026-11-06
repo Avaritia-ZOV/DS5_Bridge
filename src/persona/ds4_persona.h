@@ -16,6 +16,13 @@ bool ds4_persona_encode_input(
     HostPersonaInputReport &report
 );
 
+// Encodes the report the interrupt stream would send next without advancing
+// its report counter or motion clock, for GET_REPORT(Input).
+bool ds4_persona_encode_input_snapshot(
+    BridgeControllerState const &state,
+    HostPersonaInputReport &report
+);
+
 bool ds4_persona_decode_output_to_ds5_payload(
     uint8_t const *data,
     uint16_t len,

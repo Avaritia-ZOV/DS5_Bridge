@@ -424,7 +424,10 @@ static uint16_t ds4_copy_input_report_payload(uint8_t report_id, uint8_t *buffer
     critical_section_exit(&report_cs);
 
     HostPersonaInputReport report{};
-    if (!host_persona_encode_input(HostPersonaModeDs4, safe_state, report)) {
+    if (
+        !host_persona_is_supported(HostPersonaModeDs4)
+        || !ds4_persona_encode_input_snapshot(safe_state, report)
+    ) {
         return 0;
     }
 

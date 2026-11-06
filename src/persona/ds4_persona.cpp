@@ -48,8 +48,6 @@ constexpr char kDs4BuildDate[] = "Sep 17 2021";
 constexpr char kDs4BuildTime[] = "11:34:00";
 constexpr char kDs4FirmwareVersion[] = "0001.A00B";
 
-uint8_t ds4_report_counter = 0;
-uint16_t ds4_timestamp = 188;
 // The DualSense motion clock ticks every 1/3 us, a DS4's every 16/3 us.
 // Copying the DualSense value made DS4 motion time run 16x fast and wrap
 // every 21.8 ms, which breaks gyro integration in SDL and Steam.
@@ -58,9 +56,17 @@ constexpr uint32_t kDualSenseTicksPerDs4Tick = 16;
 // would wrap into a short one, or means the controller's clock restarted
 // (reconnect), so the DS4 clock resyncs instead.
 constexpr uint32_t kDs4MotionClockMaxGapTicks = 0xffffu * kDualSenseTicksPerDs4Tick;
-bool ds4_motion_clock_started = false;
-uint32_t ds4_motion_last_sensor_timestamp = 0;
-uint32_t ds4_motion_tick_remainder = 0;
+
+// What the interrupt IN stream carries from one report to the next.
+struct Ds4InputStream {
+    uint8_t report_counter = 0;
+    uint16_t motion_clock = 188;
+    bool motion_clock_started = false;
+    uint32_t last_sensor_timestamp = 0;
+    uint32_t tick_remainder = 0;
+};
+Ds4InputStream ds4_input_stream;
+
 // DualSense calibration (feature 0x05, here without its report ID) and DS4
 // USB calibration (0x02) share one layout of 17 little-endian fields: three
 // gyro biases, plus/minus pairs for pitch, yaw and roll, the gyro speed pair,
@@ -98,18 +104,18 @@ uint16_t clamp_u16(uint16_t value, uint16_t max_value) {
     return value > max_value ? max_value : value;
 }
 
-uint16_t ds4_motion_timestamp(uint32_t sensor_timestamp) {
-    const uint32_t elapsed = sensor_timestamp - ds4_motion_last_sensor_timestamp;
-    ds4_motion_last_sensor_timestamp = sensor_timestamp;
-    if (!ds4_motion_clock_started || elapsed > kDs4MotionClockMaxGapTicks) {
-        ds4_motion_clock_started = true;
-        ds4_motion_tick_remainder = 0;
-        return ds4_timestamp;
+uint16_t ds4_motion_timestamp(Ds4InputStream &stream, uint32_t sensor_timestamp) {
+    const uint32_t elapsed = sensor_timestamp - stream.last_sensor_timestamp;
+    stream.last_sensor_timestamp = sensor_timestamp;
+    if (!stream.motion_clock_started || elapsed > kDs4MotionClockMaxGapTicks) {
+        stream.motion_clock_started = true;
+        stream.tick_remainder = 0;
+        return stream.motion_clock;
     }
-    const uint32_t ticks = elapsed + ds4_motion_tick_remainder;
-    ds4_timestamp = static_cast<uint16_t>(ds4_timestamp + ticks / kDualSenseTicksPerDs4Tick);
-    ds4_motion_tick_remainder = ticks % kDualSenseTicksPerDs4Tick;
-    return ds4_timestamp;
+    const uint32_t ticks = elapsed + stream.tick_remainder;
+    stream.motion_clock = static_cast<uint16_t>(stream.motion_clock + ticks / kDualSenseTicksPerDs4Tick);
+    stream.tick_remainder = ticks % kDualSenseTicksPerDs4Tick;
+    return stream.motion_clock;
 }
 
 uint16_t scale_touch_y_to_ds4(uint16_t y) {
@@ -211,11 +217,15 @@ void write_ds4_calibration_report(
     }
 }
 
-} // namespace
-
-bool ds4_persona_encode_input(
+// Out of line: this object runs from SRAM, and inlining into both wrappers
+// would place a second copy of the encoder there.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
+bool encode_ds4_input(
     BridgeControllerState const &state,
-    HostPersonaInputReport &report
+    HostPersonaInputReport &report,
+    Ds4InputStream &stream
 ) {
     report.report_id = kDs4InputReportId;
     report.len = kDs4InputReportSize - 1;
@@ -244,7 +254,7 @@ bool ds4_persona_encode_input(
     if (state.r3) buttons |= kDs4ButtonR3;
     report.bytes[5] = buttons;
 
-    uint8_t ps_touch_counter = static_cast<uint8_t>((ds4_report_counter++ & 0x3f) << 2);
+    uint8_t ps_touch_counter = static_cast<uint8_t>((stream.report_counter++ & 0x3f) << 2);
     if (state.home) ps_touch_counter |= kDs4ButtonPs;
     if (state.touchpad) ps_touch_counter |= kDs4ButtonTouchpad;
     report.bytes[6] = ps_touch_counter;
@@ -252,13 +262,13 @@ bool ds4_persona_encode_input(
     report.bytes[7] = state.left_trigger;
     report.bytes[8] = state.right_trigger;
     if (!state.motion_valid) {
-        ds4_motion_clock_started = false;
+        stream.motion_clock_started = false;
     }
     write_u16(
         report.bytes + 9,
         state.motion_valid
-            ? ds4_motion_timestamp(state.sensor_timestamp)
-            : ds4_timestamp++
+            ? ds4_motion_timestamp(stream, state.sensor_timestamp)
+            : stream.motion_clock++
     );
     report.bytes[11] = 0x09;
 
@@ -277,10 +287,27 @@ bool ds4_persona_encode_input(
     report.bytes[32] = 0x01;
     report.bytes[33] = state.motion_valid
         ? static_cast<uint8_t>(state.sensor_timestamp & 0xff)
-        : static_cast<uint8_t>(ds4_report_counter & 0xff);
+        : static_cast<uint8_t>(stream.report_counter & 0xff);
     write_ds4_touch_point(report.bytes + 34, state.touch_points[0]);
     write_ds4_touch_point(report.bytes + 38, state.touch_points[1]);
     return true;
+}
+
+} // namespace
+
+bool ds4_persona_encode_input(
+    BridgeControllerState const &state,
+    HostPersonaInputReport &report
+) {
+    return encode_ds4_input(state, report, ds4_input_stream);
+}
+
+bool ds4_persona_encode_input_snapshot(
+    BridgeControllerState const &state,
+    HostPersonaInputReport &report
+) {
+    Ds4InputStream stream = ds4_input_stream;
+    return encode_ds4_input(state, report, stream);
 }
 
 bool ds4_persona_decode_output_to_ds5_payload(

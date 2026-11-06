@@ -168,20 +168,28 @@ void assert_persona_support_requires_verified_descriptors(
         throw std::runtime_error("Host persona input reports must be blocked for unverified descriptors");
     }
 
-    // DS4 GET_REPORT(Feature) gives calibration reports the controller's
-    // calibration.
+    // DS4 GET_REPORT reads keep the same gate, never advance the interrupt
+    // stream, and give calibration reports the controller's calibration.
     const auto main_cpp = read_text(source_root / "src" / "main.cpp");
+    const std::string ds4_input_block = extract_between(
+        main_cpp,
+        "static uint16_t ds4_copy_input_report_payload(",
+        "\n}\n"
+    );
     const std::string ds4_feature_block = extract_between(
         main_cpp,
         "static uint16_t ds4_copy_feature_report_payload(",
         "\n}\n"
     );
     if (
-        ds4_feature_block.find("kDualSenseFeatureCalibration") == std::string::npos
+        ds4_input_block.find("!host_persona_is_supported(HostPersonaModeDs4)") == std::string::npos
+        || ds4_input_block.find("ds4_persona_encode_input_snapshot(safe_state, report)") == std::string::npos
+        || ds4_input_block.find("host_persona_encode_input(") != std::string::npos
+        || ds4_feature_block.find("kDualSenseFeatureCalibration") == std::string::npos
         || ds4_feature_block.find("bt_copy_feature_data(") == std::string::npos
         || main_cpp.find("return ds4_copy_feature_report_payload(report_id, buffer, reqlen);") == std::string::npos
     ) {
-        throw std::runtime_error("DS4 GET_REPORT must pass the controller calibration");
+        throw std::runtime_error("DS4 GET_REPORT must snapshot input and pass the controller calibration");
     }
 
     const std::string decode_block = extract_between(
